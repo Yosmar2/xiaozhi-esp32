@@ -1,0 +1,34 @@
+name: Build Spotpear MUMA Custom
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v6.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build and merge firmware
+        run: |
+          DEFAULTS="sdkconfig.defaults"
+          if [ -f "sdkconfig.defaults.esp32s3" ]; then
+            DEFAULTS="${DEFAULTS};sdkconfig.defaults.esp32s3"
+          fi
+          DEFAULTS="${DEFAULTS};main/boards/spotpear/sp-esp32-s3-1.54-muma/sdkconfig.muma"
+          idf.py -DSDKCONFIG_DEFAULTS="${DEFAULTS}" set-target esp32s3
+          idf.py build
+          idf.py merge-bin -o build/muma-custom-merged.bin
+
+      - name: Upload merged firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp-esp32-s3-1.54-muma-custom
+          path: build/muma-custom-merged.bin
