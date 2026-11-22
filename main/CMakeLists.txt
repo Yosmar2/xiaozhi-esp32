@@ -1200,13 +1200,15 @@ endif()
 # The Otto camera board uses the USB Serial/JTAG host connection to detect
 # charging from a USB port. The board is ESP32-S3 only, so require the driver
 # on that target and keep other target builds unchanged.
-if(CONFIG_BOARD_TYPE_SPOTPEAR_ESP32_S3_1_54_MUMA)
+if(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         esp_http_server
         esp_http_client
         lwip
         nvs_flash
         json
+    )
+endif()
     )
 endif()
 if(IDF_TARGET STREQUAL "esp32s3")
