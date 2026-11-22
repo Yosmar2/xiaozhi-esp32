@@ -1207,7 +1207,6 @@ if(IDF_TARGET STREQUAL "esp32s3")
         esp_http_client
         lwip
         nvs_flash
-        json
     )
 endif()
 idf_component_register(SRCS ${SOURCES}
