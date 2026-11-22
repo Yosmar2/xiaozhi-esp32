@@ -22,8 +22,10 @@
 #include <esp_timer.h>
 #include "power_manager.h"
 #include "power_save_timer.h"
+#include "muma_hub.h"
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
+#include <cstdlib>
 
 #define TAG "Spotpear_esp32_s3_lcd_1_54"
 
@@ -67,20 +69,18 @@ private:
     Button boot_button_;
     Display* display_;
     esp_timer_handle_t touchpad_timer_;
-    Cst816d* cst816d_;
+    Cst816d* cst816d_ = nullptr;
     esp_io_expander_handle_t io_expander_ = NULL;
     esp_lcd_panel_handle_t panel_ = nullptr;
 
     PowerManager* power_manager_;
     PowerSaveTimer* power_save_timer_;
+
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_41);
         power_manager_->OnChargingStatusChanged([this](bool is_charging) {
-            if (is_charging) {
-                power_save_timer_->SetEnabled(false);
-            } else {
-                power_save_timer_->SetEnabled(true);
-            }
+            bool allow_sleep = !MumaHub::GetInstance().IsAlwaysOn() && !is_charging;
+            power_save_timer_->SetEnabled(allow_sleep);
         });
     }
 
@@ -91,6 +91,7 @@ private:
 
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
+            if (MumaHub::GetInstance().IsAlwaysOn()) return;
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
         });
@@ -99,18 +100,19 @@ private:
             GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() {
+            if (MumaHub::GetInstance().IsAlwaysOn()) return;
             ESP_LOGI(TAG, "Shutting down");
             rtc_gpio_set_level(GPIO_NUM_3, 0);
-            // 启用保持功能，确保睡眠期间电平不变
             rtc_gpio_hold_en(GPIO_NUM_3);
-            esp_lcd_panel_disp_on_off(panel_, false); //关闭显示
+            if (panel_ != nullptr) {
+                esp_lcd_panel_disp_on_off(panel_, false);
+            }
             esp_deep_sleep_start();
         });
-        power_save_timer_->SetEnabled(true);
+        power_save_timer_->SetEnabled(!MumaHub::GetInstance().IsAlwaysOn());
     }
 
     void InitializeCodecI2c() {
-        // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = I2C_NUM_0,
             .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
@@ -127,7 +129,6 @@ private:
     }
 
     void InitializeCodecI2c_Touch() {
-        // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = I2C_NUM_1,
             .sda_io_num = TP_PIN_NUM_TP_SDA,
@@ -146,24 +147,60 @@ private:
     static void touchpad_timer_callback(void* arg) {
         auto& board = (Spotpear_esp32_s3_lcd_1_54&)Board::GetInstance();
         auto touchpad = board.GetTouchpad();
+        if (touchpad == nullptr) return;
+
         static bool was_touched = false;
-        static int64_t touch_start_time = 0;
-        const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
+        static bool long_press_fired = false;
+        static int64_t touch_start_ms = 0;
+        static int start_x = 0, start_y = 0;
+        static int last_x = 0, last_y = 0;
 
         touchpad->UpdateTouchPoint();
-        auto touch_point = touchpad->GetTouchPoint();
-        // 检测触摸开始
-        if (touch_point.num > 0 && !was_touched) {
-            was_touched = true;
-            touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
-        }
-        // 检测触摸释放
-        else if (touch_point.num == 0 && was_touched) {
-            was_touched = false;
-            int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
+        auto pt = touchpad->GetTouchPoint();
+        int64_t now_ms = esp_timer_get_time() / 1000;
 
-            // 只有短触才触发
-            if (touch_duration < TOUCH_THRESHOLD_MS) {
+        if (pt.num > 0 && !was_touched) {
+            was_touched = true;
+            long_press_fired = false;
+            touch_start_ms = now_ms;
+            start_x = last_x = pt.x;
+            start_y = last_y = pt.y;
+        } else if (pt.num > 0 && was_touched) {
+            last_x = pt.x;
+            last_y = pt.y;
+            if (!long_press_fired && (now_ms - touch_start_ms >= 800)) {
+                int adx = std::abs(last_x - start_x);
+                int ady = std::abs(last_y - start_y);
+                if (adx < 25 && ady < 25) {
+                    long_press_fired = true;
+                    MumaHub::GetInstance().ToggleMicMute();
+                }
+            }
+        } else if (pt.num == 0 && was_touched) {
+            was_touched = false;
+            if (long_press_fired) return;
+
+            auto& hub = MumaHub::GetInstance();
+            if (hub.IsAlarmRinging()) {
+                hub.StopAlarm();
+                return;
+            }
+
+            int dx = last_x - start_x;
+            int dy = last_y - start_y;
+            int adx = std::abs(dx);
+            int ady = std::abs(dy);
+            int64_t duration = now_ms - touch_start_ms;
+
+            if (adx > 45 && adx > ady) {
+                hub.ToggleClockView();
+            } else if (ady > 40 && ady > adx) {
+                if (start_x < DISPLAY_WIDTH / 2) {
+                    hub.AdjustBrightness(dy < 0 ? 15 : -15);
+                } else {
+                    hub.AdjustVolume(dy < 0 ? 10 : -10);
+                }
+            } else if (duration < 500 && adx < 25 && ady < 25) {
                 auto& app = Application::GetInstance();
                 if (app.GetDeviceState() == kDeviceStateStarting) {
                     board.EnterWifiConfigMode();
@@ -178,7 +215,6 @@ private:
         ESP_LOGI(TAG, "Init Cst816D");
         cst816d_ = new Cst816d(i2c_bus_, 0x15);
 
-        // 创建定时器，10ms 间隔
         esp_timer_create_args_t timer_args = {
             .callback = touchpad_timer_callback,
             .arg = NULL,
@@ -188,12 +224,12 @@ private:
         };
 
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &touchpad_timer_));
-        ESP_ERROR_CHECK(esp_timer_start_periodic(touchpad_timer_, 10 * 1000)); // 10ms = 10000us
+        ESP_ERROR_CHECK(esp_timer_start_periodic(touchpad_timer_, 10 * 1000));
     }
 
     void EnableLcdCs() {
-        if(io_expander_ != NULL) {
-            esp_io_expander_set_level(io_expander_, DISPLAY_SPI_CS_PIN, 0);// 置低 LCD CS
+        if (io_expander_ != NULL) {
+            esp_io_expander_set_level(io_expander_, DISPLAY_SPI_CS_PIN, 0);
         }
     }
 
@@ -211,8 +247,6 @@ private:
     void InitializeSt7789Display() {
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
-        // 液晶屏控制IO初始化
-        ESP_LOGD(TAG, "Install panel IO");
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num = DISPLAY_SPI_CS_PIN;
         io_config.dc_gpio_num = DISPLAY_SPI_DC_PIN;
@@ -223,8 +257,6 @@ private:
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io));
 
-        // 初始化液晶屏驱动芯片ST7789
-        ESP_LOGD(TAG, "Install LCD driver");
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = DISPLAY_SPI_RESET_PIN;
         panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
@@ -237,18 +269,21 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
 
-        // uint8_t data_0xBB[] = { 0x3F };
-        // esp_lcd_panel_io_tx_param(panel_io, 0xBB, data_0xBB, sizeof(data_0xBB));
-
         uint8_t data_0xBB[] = { 0x38 };
         esp_lcd_panel_io_tx_param(panel_io, 0xBB, data_0xBB, sizeof(data_0xBB));
 
+        panel_ = panel;
         display_ = new SpiLcdDisplay(panel_io, panel,
-                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
+                                     DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            if (MumaHub::GetInstance().IsAlarmRinging()) {
+                MumaHub::GetInstance().StopAlarm();
+                return;
+            }
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
@@ -259,8 +294,7 @@ private:
     }
 
 public:
-
-    Spotpear_esp32_s3_lcd_1_54() :boot_button_(BOOT_BUTTON_GPIO){
+    Spotpear_esp32_s3_lcd_1_54() : boot_button_(BOOT_BUTTON_GPIO) {
         gpio_set_direction(TP_PIN_NUM_TP_INT, GPIO_MODE_INPUT);
         int level = gpio_get_level(TP_PIN_NUM_TP_INT);
         if (level == 1) {
@@ -275,6 +309,8 @@ public:
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
 
+        MumaHub::GetInstance().RegisterMcpTools();
+        MumaHub::GetInstance().Start();
     }
 
     virtual Led* GetLed() override {
@@ -303,12 +339,13 @@ public:
     }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
-        static bool last_discharging = false;
+        static bool last_allow_sleep = false;
         charging = power_manager_->IsCharging();
         discharging = power_manager_->IsDischarging();
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
+        bool allow_sleep = !MumaHub::GetInstance().IsAlwaysOn() && discharging;
+        if (allow_sleep != last_allow_sleep) {
+            power_save_timer_->SetEnabled(allow_sleep);
+            last_allow_sleep = allow_sleep;
         }
         level = power_manager_->GetBatteryLevel();
         return true;
