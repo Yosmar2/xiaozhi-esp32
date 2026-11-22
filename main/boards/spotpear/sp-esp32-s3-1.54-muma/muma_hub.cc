@@ -1,3 +1,4 @@
+#pragma GCC diagnostic ignored "-Wformat-truncation"
 #include "muma_hub.h"
 
 #include "application.h"
