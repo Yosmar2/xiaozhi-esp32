@@ -28,7 +28,7 @@ jobs:
           DEFAULTS="${DEFAULTS};main/boards/spotpear/sp-esp32-s3-1.54-muma/sdkconfig.muma"
           idf.py -DSDKCONFIG_DEFAULTS="${DEFAULTS}" set-target esp32s3
           idf.py build
-          idf.py merge-bin -o build/muma-custom-merged.bin
+          idf.py merge-bin -o muma-custom-merged.bin
 
       - name: Upload merged firmware
         uses: actions/upload-artifact@v4
