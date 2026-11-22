@@ -1202,17 +1202,13 @@ endif()
 # on that target and keep other target builds unchanged.
 if(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+        esp_driver_usb_serial_jtag
         esp_http_server
         esp_http_client
         lwip
         nvs_flash
         json
     )
-endif()
-    )
-endif()
-if(IDF_TARGET STREQUAL "esp32s3")
-    list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_driver_usb_serial_jtag)
 endif()
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
